@@ -6,6 +6,7 @@ const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const intervalMs = parseInt(process.env.WORKER_INTERVAL_MS || '5000', 10);
 const batchSize = parseInt(process.env.WORKER_BATCH_SIZE || '10', 10);
+const n8nWebhookUrl = process.env.N8N_WEBHOOK_URL?.trim() || null;
 
 if (!supabaseUrl || !supabaseServiceKey) {
   console.error('[worker] ERRO CRÍTICO: SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY são obrigatórios.');
@@ -68,21 +69,25 @@ async function runCycle() {
       // ━━━ Passo 3: Processar cada evento reivindicado ━━━
       for (const event of events) {
         try {
-          // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-          // TODO: Aqui vai o processamento real (IA, follow-up, automações)
-          // por tipo de evento (event.event_type):
-          //
-          // switch (event.event_type) {
-          //   case 'whatsapp.message.received':
-          //     await handleWhatsAppMessage(event.payload);
-          //     break;
-          //   case 'instagram.message.received':
-          //     await handleInstagramMessage(event.payload);
-          //     break;
-          // }
-          // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          // ━━━ Integração n8n: Enviar evento via HTTP POST ━━━
+          if (n8nWebhookUrl) {
+            const res = await fetch(n8nWebhookUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(event),
+            });
 
-          // Por enquanto: marcação de sucesso (done)
+            if (!res.ok) {
+              const errBody = await res.text().catch(() => '');
+              throw new Error(`Falha no webhook n8n (HTTP ${res.status}): ${errBody.slice(0, 200)}`);
+            }
+
+            console.log(`[worker] evento ${event.id} enviado ao n8n (status ${res.status})`);
+          } else {
+            console.log('[worker] N8N_WEBHOOK_URL não configurada, pulando POST');
+          }
+
+          // Marcação de sucesso no Supabase após envio bem-sucedido
           const now = new Date().toISOString();
           const { error: doneErr } = await supabase
             .from('event_log')
