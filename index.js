@@ -4,7 +4,7 @@ import { createClient } from '@supabase/supabase-js';
 import crypto from 'node:crypto';
 
 function ensureFreshContextToken(event) {
-  const secret = process.env.AUTOMATION_TOKEN_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const secret = process.env.AUTOMATION_TOKEN_SECRET;
   if (!secret) return event.payload?.contextToken || null;
 
   const payload = event.payload || {};
