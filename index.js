@@ -1,6 +1,45 @@
 import 'dotenv/config';
 import { createClient } from '@supabase/supabase-js';
 
+import crypto from 'node:crypto';
+
+function ensureFreshContextToken(event) {
+  const secret = process.env.AUTOMATION_TOKEN_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!secret) return event.payload?.contextToken || null;
+
+  const payload = event.payload || {};
+  if (!payload.conversationId || !event.company_id) {
+    return payload.contextToken || null;
+  }
+
+  // Generate a fresh token for n8n delivery (30 minutes TTL)
+  const now = Math.floor(Date.now() / 1000);
+  const tokenPayload = {
+    eventId: event.id,
+    companyId: event.company_id,
+    conversationId: payload.conversationId,
+    leadId: payload.leadId || null,
+    phone: payload.phone || null,
+    channel: payload.channel || null,
+    scope: 'automation:booking',
+    iat: now,
+    exp: now + 1800,
+  };
+
+  const header = { alg: 'HS256', typ: 'CTX' };
+  const b64 = (s) => Buffer.from(s).toString('base64').replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+  const encHeader = b64(JSON.stringify(header));
+  const encPayload = b64(JSON.stringify(tokenPayload));
+  const sig = crypto.createHmac('sha256', secret)
+    .update(`${encHeader}.${encPayload}`)
+    .digest('base64')
+    .replace(/=/g, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_');
+
+  return `${encHeader}.${encPayload}.${sig}`;
+}
+
 // ━━━ 1. Configuration & Validation ━━━
 const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -71,9 +110,14 @@ async function runCycle() {
         try {
           // ━━━ Integração n8n: Enviar evento via HTTP POST ━━━
           if (n8nWebhookUrl) {
+            const freshToken = ensureFreshContextToken(event);
             const outboundEvent = {
               ...event,
-              contextToken: event.payload?.contextToken || null,
+              contextToken: freshToken,
+              payload: {
+                ...(event.payload || {}),
+                contextToken: freshToken,
+              },
             };
 
             const res = await fetch(n8nWebhookUrl, {
