@@ -71,10 +71,15 @@ async function runCycle() {
         try {
           // ━━━ Integração n8n: Enviar evento via HTTP POST ━━━
           if (n8nWebhookUrl) {
+            const outboundEvent = {
+              ...event,
+              contextToken: event.payload?.contextToken || null,
+            };
+
             const res = await fetch(n8nWebhookUrl, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(event),
+              body: JSON.stringify(outboundEvent),
             });
 
             if (!res.ok) {
