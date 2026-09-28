@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { createClient } from '@supabase/supabase-js';
 
 import crypto from 'node:crypto';
+import { groupEventsByConversation, processGroupsWithConcurrency } from './processing.js';
 
 function ensureFreshContextToken(event) {
   const secret = process.env.AUTOMATION_TOKEN_SECRET;
@@ -45,6 +46,8 @@ const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const intervalMs = parseInt(process.env.WORKER_INTERVAL_MS || '5000', 10);
 const batchSize = parseInt(process.env.WORKER_BATCH_SIZE || '10', 10);
+const concurrency = parseInt(process.env.WORKER_CONCURRENCY || '5', 10);
+const webhookTimeoutMs = parseInt(process.env.N8N_WEBHOOK_TIMEOUT_MS || '60000', 10);
 const n8nWebhookUrl = process.env.N8N_WEBHOOK_URL?.trim() || null;
 
 if (!supabaseUrl || !supabaseServiceKey) {
@@ -61,7 +64,7 @@ const supabase = createClient(supabaseUrl, supabaseServiceKey, {
   },
 });
 
-console.log(`[worker] iniciado, intervalo ${intervalMs}ms, batch ${batchSize}`);
+console.log(`[worker] iniciado, intervalo ${intervalMs}ms, batch ${batchSize}, concorrência ${concurrency}`);
 
 // ━━━ 3. State & Shutdown Handling ━━━
 let isRunning = true;
@@ -105,8 +108,9 @@ async function runCycle() {
       let doneCount = 0;
       let failedCount = 0;
 
-      // ━━━ Passo 3: Processar cada evento reivindicado ━━━
-      for (const event of events) {
+      // Conversas diferentes avançam em paralelo; eventos da mesma conversa preservam a ordem.
+      const groups = groupEventsByConversation(events);
+      await processGroupsWithConcurrency(groups, concurrency, async (event) => {
         try {
           // ━━━ Integração n8n: Enviar evento via HTTP POST ━━━
           if (n8nWebhookUrl) {
@@ -120,11 +124,14 @@ async function runCycle() {
               },
             };
 
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), webhookTimeoutMs);
             const res = await fetch(n8nWebhookUrl, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(outboundEvent),
-            });
+              signal: controller.signal,
+            }).finally(() => clearTimeout(timeout));
 
             if (!res.ok) {
               const errBody = await res.text().catch(() => '');
@@ -170,7 +177,7 @@ async function runCycle() {
 
           failedCount++;
         }
-      }
+      });
 
       // ━━━ Passo 4: Log de resumo do lote ━━━
       console.log(`[worker] ciclo: claimed=${events.length} done=${doneCount} failed=${failedCount}`);

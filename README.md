@@ -37,6 +37,8 @@ worker/
    SUPABASE_SERVICE_ROLE_KEY=seu-token-service-role-aqui
    WORKER_INTERVAL_MS=5000
    WORKER_BATCH_SIZE=10
+   WORKER_CONCURRENCY=5
+   N8N_WEBHOOK_TIMEOUT_MS=60000
    ```
 
 4. **Executar o Worker:**
