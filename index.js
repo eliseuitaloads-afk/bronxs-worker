@@ -2,7 +2,11 @@ import 'dotenv/config';
 import { createClient } from '@supabase/supabase-js';
 
 import crypto from 'node:crypto';
-import { groupEventsByConversation, processGroupsWithConcurrency } from './processing.js';
+import {
+  calculateRetryDelay,
+  groupEventsByConversation,
+  processGroupsWithConcurrency,
+} from './processing.js';
 
 function ensureFreshContextToken(event) {
   const secret = process.env.AUTOMATION_TOKEN_SECRET;
@@ -48,6 +52,9 @@ const intervalMs = parseInt(process.env.WORKER_INTERVAL_MS || '5000', 10);
 const batchSize = parseInt(process.env.WORKER_BATCH_SIZE || '10', 10);
 const concurrency = parseInt(process.env.WORKER_CONCURRENCY || '5', 10);
 const webhookTimeoutMs = parseInt(process.env.N8N_WEBHOOK_TIMEOUT_MS || '60000', 10);
+const requestTimeoutMs = parseInt(process.env.SUPABASE_REQUEST_TIMEOUT_MS || '15000', 10);
+const rescueIntervalMs = parseInt(process.env.WORKER_RESCUE_INTERVAL_MS || '60000', 10);
+const maxBackoffMs = parseInt(process.env.WORKER_MAX_BACKOFF_MS || '300000', 10);
 const n8nWebhookUrl = process.env.N8N_WEBHOOK_URL?.trim() || null;
 
 if (!supabaseUrl || !supabaseServiceKey) {
@@ -57,11 +64,22 @@ if (!supabaseUrl || !supabaseServiceKey) {
 }
 
 // ━━━ 2. Supabase Client (Service Role bypasses RLS) ━━━
+const nativeFetch = globalThis.fetch.bind(globalThis);
+const supabaseFetch = (input, init = {}) => {
+  const timeoutSignal = AbortSignal.timeout(requestTimeoutMs);
+  const signal = init.signal
+    ? AbortSignal.any([init.signal, timeoutSignal])
+    : timeoutSignal;
+
+  return nativeFetch(input, { ...init, signal });
+};
+
 const supabase = createClient(supabaseUrl, supabaseServiceKey, {
   auth: {
     persistSession: false,
     autoRefreshToken: false,
   },
+  global: { fetch: supabaseFetch },
 });
 
 console.log(`[worker] iniciado, intervalo ${intervalMs}ms, batch ${batchSize}, concorrência ${concurrency}`);
@@ -69,6 +87,8 @@ console.log(`[worker] iniciado, intervalo ${intervalMs}ms, batch ${batchSize}, c
 // ━━━ 3. State & Shutdown Handling ━━━
 let isRunning = true;
 let currentTimer = null;
+let consecutiveFailures = 0;
+let lastRescueAt = 0;
 
 function shutdown(signal) {
   console.log(`\n[worker] Recebido sinal ${signal}. Encerrando com segurança...`);
@@ -86,15 +106,19 @@ async function runCycle() {
 
   try {
     // ━━━ Passo 1: Resgatar eventos presos em 'processing' (ex: worker anterior caiu) ━━━
-    try {
-      const { data: rescuedCount, error: rescueErr } = await supabase.rpc('rescue_stuck_events');
-      if (rescueErr) {
-        console.error('[worker] Falha ao executar rescue_stuck_events:', rescueErr.message);
-      } else if (rescuedCount && Number(rescuedCount) > 0) {
-        console.log(`[worker] Resgatou ${rescuedCount} evento(s) preso(s) de volta para 'pending'`);
+    if (Date.now() - lastRescueAt >= rescueIntervalMs) {
+      try {
+        const { data: rescuedCount, error: rescueErr } = await supabase.rpc('rescue_stuck_events');
+        if (rescueErr) {
+          throw new Error(`Falha ao executar rescue_stuck_events: ${rescueErr.message}`);
+        }
+        lastRescueAt = Date.now();
+        if (rescuedCount && Number(rescuedCount) > 0) {
+          console.log(`[worker] Resgatou ${rescuedCount} evento(s) preso(s) de volta para 'pending'`);
+        }
+      } catch (rescueEx) {
+        throw new Error(`Exceção em rescue_stuck_events: ${rescueEx?.message || rescueEx}`);
       }
-    } catch (rescueEx) {
-      console.error('[worker] Exceção em rescue_stuck_events:', rescueEx?.message || rescueEx);
     }
 
     // ━━━ Passo 2: Reivindicar lote de eventos pendentes atomicamente ━━━
@@ -103,7 +127,7 @@ async function runCycle() {
     });
 
     if (claimErr) {
-      console.error('[worker] Falha ao reivindicar eventos (claim_events):', claimErr.message);
+      throw new Error(`Falha ao reivindicar eventos (claim_events): ${claimErr.message}`);
     } else if (events && Array.isArray(events) && events.length > 0) {
       let doneCount = 0;
       let failedCount = 0;
@@ -182,13 +206,19 @@ async function runCycle() {
       // ━━━ Passo 4: Log de resumo do lote ━━━
       console.log(`[worker] ciclo: claimed=${events.length} done=${doneCount} failed=${failedCount}`);
     }
+    consecutiveFailures = 0;
   } catch (cycleErr) {
     // ━━━ Passo 5: Resiliência total — erro no ciclo não mata o worker ━━━
+    consecutiveFailures++;
     console.error('[worker] Erro inesperado no ciclo:', cycleErr?.message || cycleErr);
   } finally {
     // Agenda o próximo ciclo após conclusão do anterior (evita sobreposição)
     if (isRunning) {
-      currentTimer = setTimeout(runCycle, intervalMs);
+      const nextDelay = calculateRetryDelay(consecutiveFailures, intervalMs, maxBackoffMs);
+      if (consecutiveFailures > 0) {
+        console.warn(`[worker] Banco indisponível; nova tentativa em ${Math.ceil(nextDelay / 1000)}s`);
+      }
+      currentTimer = setTimeout(runCycle, nextDelay);
     }
   }
 }

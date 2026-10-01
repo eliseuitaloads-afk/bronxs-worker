@@ -38,6 +38,9 @@ worker/
    WORKER_INTERVAL_MS=5000
    WORKER_BATCH_SIZE=10
    WORKER_CONCURRENCY=5
+   SUPABASE_REQUEST_TIMEOUT_MS=15000
+   WORKER_RESCUE_INTERVAL_MS=60000
+   WORKER_MAX_BACKOFF_MS=300000
    N8N_WEBHOOK_TIMEOUT_MS=60000
    ```
 
@@ -68,4 +71,7 @@ worker/
    - `SUPABASE_SERVICE_ROLE_KEY`
    - `WORKER_INTERVAL_MS=5000`
    - `WORKER_BATCH_SIZE=10`
+   - `SUPABASE_REQUEST_TIMEOUT_MS=15000`
+   - `WORKER_RESCUE_INTERVAL_MS=60000`
+   - `WORKER_MAX_BACKOFF_MS=300000`
 3. O Easypanel construirá o contêiner usando o `Dockerfile` e manterá o processo em execução com reinicialização automática (`restart: unless-stopped`).

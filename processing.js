@@ -25,3 +25,10 @@ export async function processGroupsWithConcurrency(groups, concurrency, processE
     }
   }));
 }
+
+export function calculateRetryDelay(consecutiveFailures, intervalMs, maxBackoffMs) {
+  if (consecutiveFailures <= 0) return intervalMs;
+
+  const exponent = Math.min(consecutiveFailures, 8);
+  return Math.min(maxBackoffMs, intervalMs * (2 ** exponent));
+}

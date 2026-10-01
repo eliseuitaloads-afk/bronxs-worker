@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { groupEventsByConversation, processGroupsWithConcurrency } from './processing.js';
+import {
+  calculateRetryDelay,
+  groupEventsByConversation,
+  processGroupsWithConcurrency,
+} from './processing.js';
 
 test('processa dez clientes com concorrência limitada', async () => {
   const events = Array.from({ length: 10 }, (_, index) => ({
@@ -38,4 +42,11 @@ test('preserva a ordem dos eventos da mesma conversa', async () => {
   });
 
   assert.deepEqual(processed, [1, 2, 3]);
+});
+
+test('aplica recuo progressivo e respeita o limite maximo', () => {
+  assert.equal(calculateRetryDelay(0, 5_000, 300_000), 5_000);
+  assert.equal(calculateRetryDelay(1, 5_000, 300_000), 10_000);
+  assert.equal(calculateRetryDelay(4, 5_000, 300_000), 80_000);
+  assert.equal(calculateRetryDelay(10, 5_000, 300_000), 300_000);
 });
